@@ -36,6 +36,7 @@ flowchart LR
     S -->|ResNet-50 classifier| G2
     G1 & G2 -->|rule engine| G3
     G3 --> D[Dashboard]
+    S -->|13 validation rules| Q[Data quality scorecard<br/>Power BI]
 ```
 
 | Layer | What happens |
@@ -51,6 +52,7 @@ flowchart LR
 ## Tech stack
 
 - **Databricks:** Delta Live Tables (Lakeflow Declarative Pipelines), Auto Loader, Unity Catalog, MLflow, AI/BI dashboards
+- **Reporting:** Power BI (data quality scorecard)
 - **AWS:** Kinesis Data Streams, S3, IAM, CloudShell
 - **Python:** PySpark, PyTorch, Hugging Face Transformers, boto3, pandas
 
@@ -70,6 +72,57 @@ flowchart LR
 
 **Rule engine.** Business rules are stored as SQL expressions in a Delta table and applied dynamically. Rules can be added or changed without editing code. They check policy dates, claim amounts against the insured value, reported severity against the predicted damage, and driving speed. They then decide whether to release funds or investigate.
 
+## Data quality scorecard
+
+Before claims are trusted for decisions, every claim in the Silver layer is checked against 13 data quality rules. The scorecard records which rules each claim passes or fails and why, and a Power BI page summarizes the results.
+
+![Data quality scorecard](quality/data_quality_scorecard.png)
+
+| ID | Rule | Dimension | Fails when |
+|---|---|---|---|
+| R01 | claim_no_present | Completeness | Claim number is missing |
+| R02 | claim_no_unique | Uniqueness | Claim number appears more than once |
+| R03 | policy_exists | Referential integrity | Claim's policy number has no matching policy record |
+| R04 | incident_date_valid | Validity | Incident date is missing or not a valid date |
+| R05 | claim_date_valid | Validity | Claim date is missing or not a valid date |
+| R06 | incident_before_claim | Consistency | Incident date is after the claim date |
+| R07 | claim_within_policy_period | Consistency | Claim date falls outside the policy's effective period |
+| R08 | incident_hour_in_range | Validity | Incident hour is missing or outside 0–23 |
+| R09 | driver_age_plausible | Validity | Driver age is missing or outside 16–100 |
+| R10 | license_before_incident | Consistency | Licence issue date is after the incident |
+| R11 | total_amount_valid | Validity | Total claim amount is missing, not numeric, or negative |
+| R12 | amount_components_add_up | Consistency | Injury + property + vehicle amounts don't add up to the total (±1) |
+| R13 | severity_recognized | Validity | Incident severity is missing or not a recognized category |
+
+**How it works.** The rules are stored as SQL expressions in a Delta table (`dq_rules`), the same rules-as-data pattern as the rule engine, so a rule can be added or changed without rewriting the notebook. Each check uses `try_cast`, so a malformed value fails the rule with a reason instead of crashing the run, and a check that can't be evaluated (for example, a missing date) counts as a failure. A rule whose columns don't exist is skipped and reported.
+
+**Outputs** (schema `smart_claims_dev.04_quality`):
+
+| Table | Grain | Used for |
+|---|---|---|
+| `dq_rules` | One row per rule | Rule definitions and failure reasons |
+| `dq_results` | One row per claim per rule | Pass/fail and failure reason for every check |
+| `dq_claim_status` | One row per claim | Number of failed rules, their names, and overall Pass/Fail |
+| `dq_scorecard` | One row per rule | Records checked, passed, failed, and pass rate |
+
+**Findings.** All 12,991 claims passed 9 of the 13 rules: every record has a unique claim number, a matching policy, valid dates and hours, a recognized severity, and amounts that add up. The failures are all in date consistency and driver age:
+
+| Rule | Claims failing | Share |
+|---|---|---|
+| R06 incident_before_claim | 2,257 | 17.4% |
+| R07 claim_within_policy_period | 358 | 2.8% |
+| R10 license_before_incident | 344 | 2.6% |
+| R09 driver_age_plausible | 7 | 0.1% |
+
+The largest issue is claims whose incident date is *after* the claim was filed, about one claim in six. In a real system that pattern would point to a data entry or date-format problem worth tracing back to the source before any date-based reporting is trusted. The 358 claims outside their policy period are the same issue the rule engine flags as `NOT VALID`, so the two checks agree.
+
+**Limitations.**
+
+- The source data is synthetic insurance-claims data from the course, not real policyholder data. Failure counts describe this dataset only.
+- The rules check whether values are complete, valid and consistent. They can't show that a value is *correct*, for example a plausible but wrong driver age.
+- Thresholds such as the 16–100 driver age range and the ±1 tolerance on amounts are assumptions; in a real setting they would be agreed with the people who own the data.
+- The Power BI report reads CSV exports of the scorecard tables, so it shows a snapshot rather than refreshing live from Databricks.
+
 ## Repository structure
 
 ```
@@ -83,6 +136,7 @@ ml/
   ML_Notebook_2                  model training, registration and scoring
   Rule_Engine                    rule table and claim decisions
 dashboard/                       dashboard definition, PDF export and screenshot
+quality/                         data quality scorecard notebook, Power BI report and screenshot
 aws/                             IAM trust and permission policies (account ID and External IDs redacted)
 images/                          pipeline graph screenshots
 telematics_producer.py           Kinesis producer (run in AWS CloudShell)
@@ -122,7 +176,7 @@ The classifier was trained on 44 images and validated on 12. Most of its errors 
 1. **AWS:** create a Kinesis stream (provisioned, 1 shard) and an S3 bucket. Create IAM roles for Databricks using the policies in `aws/`, with your account ID and External IDs filled in.
 2. **Databricks:** create a `smart_claims_dev` catalog with schemas `00_landing`, `01_bronze`, `02_silver` and `03_gold`. Then create the service credential, storage credential, external location and volumes.
 3. **Data:** download the source data from the [course repository](https://github.com/datamyselfai/databricks-zero-to-hero-course/tree/main/data). Upload the images and metadata to S3 and the CSVs to a volume.
-4. **Run the pipeline:** stream telematics with `python3 telematics_producer.py --limit 0` in CloudShell. Then run the ingestion pipelines, the medallion pipeline, the ML notebook and the rule engine, in that order.
+4. **Run the pipeline:** stream telematics with `python3 telematics_producer.py --limit 0` in CloudShell. Then run the ingestion pipelines, the medallion pipeline, the ML notebook, the rule engine and the data quality scorecard, in that order.
 
 Delete the Kinesis stream when you're done. It bills by the hour.
 
