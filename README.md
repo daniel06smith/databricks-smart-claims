@@ -76,7 +76,7 @@ flowchart LR
 
 Before claims are trusted for decisions, every claim in the Silver layer is checked against 13 data quality rules. The scorecard records which rules each claim passes or fails and why, and a Power BI page summarizes the results.
 
-![Data quality scorecard](quality/data_quality_scorecard.png)
+![Data quality scorecard](powerbi/data_quality_scorecard.png)
 
 | ID | Rule | Dimension | Fails when |
 |---|---|---|---|
@@ -96,16 +96,18 @@ Before claims are trusted for decisions, every claim in the Silver layer is chec
 
 **How it works.** The rules are stored as SQL expressions in a Delta table (`dq_rules`), the same rules-as-data pattern as the rule engine, so a rule can be added or changed without rewriting the notebook. Each check uses `try_cast`, so a malformed value fails the rule with a reason instead of crashing the run, and a check that can't be evaluated (for example, a missing date) counts as a failure. A rule whose columns don't exist is skipped and reported.
 
-**Outputs** (schema `smart_claims_dev.04_quality`):
+The notebook is `data_quality_scorecard.py`. The Power BI report and the CSV exports it reads are in `powerbi/`.
+
+**Outputs** (schema `smart_claims_dev.04_quality`, exported to `powerbi/data/`):
 
 | Table | Grain | Used for |
 |---|---|---|
 | `dq_rules` | One row per rule | Rule definitions and failure reasons |
 | `dq_results` | One row per claim per rule | Pass/fail and failure reason for every check |
-| `dq_claim_status` | One row per claim | Number of failed rules, their names, and overall Pass/Fail |
-| `dq_scorecard` | One row per rule | Records checked, passed, failed, and pass rate |
+| `dq_claim_status` | One row per claim | Number of failed rules, their names, overall Pass/Fail, and the claim's amount, date and severity |
+| `dq_scorecard` | One row per rule | Records checked, passed, failed, pass rate, and a plain-English label |
 
-**Findings.** All 12,991 claims passed 9 of the 13 rules: every record has a unique claim number, a matching policy, valid dates and hours, a recognized severity, and amounts that add up. The failures are all in date consistency and driver age:
+**Findings.** **78%** of the 12,991 claims pass all 13 rules; about 2,840 need review, carrying **$145.2M** in claim value. Every claim passed 9 of the rules: every record has a unique claim number, a matching policy, valid dates and hours, a recognized severity, and amounts that add up. The failures are all in date consistency and driver age:
 
 | Rule | Claims failing | Share |
 |---|---|---|
@@ -136,9 +138,11 @@ ml/
   ML_Notebook_2                  model training, registration and scoring
   Rule_Engine                    rule table and claim decisions
 dashboard/                       dashboard definition, PDF export and screenshot
-quality/                         data quality scorecard notebook, Power BI report and screenshot
+powerbi/                         data quality Power BI report and screenshot
+  data/                          scorecard CSV exports the report reads
 aws/                             IAM trust and permission policies (account ID and External IDs redacted)
 images/                          pipeline graph screenshots
+data_quality_scorecard.py        data quality rules, results and CSV export (Databricks notebook)
 telematics_producer.py           Kinesis producer (run in AWS CloudShell)
 ```
 
